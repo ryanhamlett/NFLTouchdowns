@@ -1,0 +1,124 @@
+#this code is mostly a quick run through some neural network code in the neuralnet and nnet packages and performing some minor model selection on some rather simplistic versions of the model.
+#This code will include other models (random forest and logistic regression) in the near future
+
+library(nflscrapr) #using nflscrapr package found here https://github.com/maksimhorowitz/nflscrapR
+library(tidyverse)
+
+pbp_2018 = scrape_season_play_by_play(2018, week = 1) #scraping all play by play data from 2018
+write.csv(pbp_2018, file = "pbp_2018.csv") #saving data to computer
+
+data = read.csv("C:/Users/ryanh/Documents/pbp_2018.csv")
+data$play_type = as.factor(data$play_type)
+
+run_and_pass = data[which(data$play_type == "run" | data$play_type == "pass"),] #limiting to offensive plays (runs or passes)
+
+#choosing the covariates we wish to consider in our model, note that play_type for pass and run defaults to 5 and 9 respectively as factor names
+#also scaling numeric covariates (yards_to_td, time, ydstogo) to help neural network fit more effectively
+#the response is touchdown (1 = TD, 0 = No TD), the covariates are type (run/pass), yards_to_td (yards from endzone), time (time remaining in the game in seconds), down (down 1-4), ydstogo(distance from first down), and goaltogo (indicator that is 1 if the play is in a "goal to go" scenario, 0 if it is not)
+
+newdata = as.data.frame(cbind(touchdown = run_and_pass$touchdown, 
+                              type = run_and_pass$play_type, 
+                              yards_to_td = run_and_pass$yardline_100, 
+                              time = run_and_pass$game_seconds_remaining, 
+                              down = run_and_pass$down, 
+                              ydstogo = run_and_pass$ydstogo, 
+                              goaltogo = run_and_pass$goal_to_go))
+newdata = na.omit(newdata)
+newdata$touchdown = as.factor(newdata$touchdown)
+newdata$type = as.factor(newdata$type)
+newdata$yards_to_td = (newdata$yards_to_td - min(newdata$yards_to_td))/(max(newdata$yards_to_td) - min(newdata$yards_to_td))*(2) - 1
+newdata$time = (newdata$time - min(newdata$time))/(max(newdata$time) - min(newdata$time))*(2) - 1
+newdata$down = as.factor(newdata$down)
+newdata$ydstogo = (newdata$ydstogo - min(newdata$ydstogo))/(max(newdata$ydstogo) - min(newdata$ydstogo))*(2) - 1
+newdata$goaltogo = as.factor(newdata$goaltogo)
+
+
+
+
+#using neuralnet package first
+
+library(neuralnet)
+
+ind = sample(2, nrow(newdata), replace = T, prob = c(0.7, 0.3)) #segmenting the data into training and test datasets at 70/30 split
+train = newdata[ind == 1,]
+test = newdata[ind == 2,]
+
+new.train = model.matrix(~ ., data = train) #creating model matrices for training and test data to account for categorical variable inputs for the neuralnet function
+new.test = model.matrix(~ ., data = test)
+
+#this is the absolute worst we could do as a prediction if we guessed that every play was NOT a touchdown. We will compare to this number later
+benchmark.accuracy = length(which(train$touchdown == 0))/length(train$touchdown) #assuming we just guessed that all plays were not touchdown
+
+storage = matrix(nrow = 7, ncol = 2) #a matrix that will hold some values in our neuralnet function
+models = list() #will hold all list info
+
+#this function will run 7 different neural networks with increasing amount of nodes (from 1 to 7, since that is the number of inputs we have)
+for(i in 1:7){
+  
+  model1 = neuralnet(touchdown1 ~ type9 + yards_to_td + time + down2 + down3 + down4 + ydstogo + goaltogo1, 
+                   data = new.train, hidden = i, linear.output = FALSE) 
+
+
+  pred1 = predict(model1, new.test) #predicting using the test data
+  pred1 = ifelse(pred1 > 0.5, 1, 0) #using a 0.5 threshold, we assign TRUE (1) or FALSE (0) values to our results as a classification method
+  conf.mat = table(pred1, test[,1]) #produce the confusion matrix for the model
+  
+  #calculating prediction accuracy, precision, recall, and f1 score as a means of evaluating the model performance
+  test.accuracy = sum(diag(conf.mat))/sum(conf.mat) #overall prediction accuracy
+  precision = conf.mat[2,2]/(conf.mat[2, 2] + conf.mat[2,1]) 
+  recall = conf.mat[2,2]/(conf.mat[2,2] + conf.mat[1,2])
+  f1 = 2*precision*recall/(precision + recall)
+  
+  models[[i]] = model1
+  confusion[[i]] = conf.mat
+  acc.storage[i, 1] = i
+  acc.storage[i, 2] = test.accuracy
+  acc.storage[i, 3] = precision
+  acc.storage[i, 4] = recall
+  acc.storage[i, 5] = f1
+
+}
+
+#a quick summary of best model performance for each metric by the number of nodes involved
+report.best = c(accuracy = which.max(acc.storage[,2]), precision = which.max(acc.storage[,3]), recall = which.max(acc.storage[,4]), f1 = which.max(acc.storage[,5]))
+
+
+#nnet
+library(nnet)
+
+#we run the same code in nnet instead of neuralnet
+#nnet doesn't have cool plot functions but runs more quickly in my experience
+
+acc.storage = matrix(nrow = 7, ncol = 5) #choose i to go from 1 to 7 to avoid overfitting since we only have 7 inputs
+models1 = list()
+confusion = list()
+
+#basically the same code as before, just we don't have to create model matrices now, nnet is equipped to handle factors unlike neuralnet
+for(i in 1:7){
+  
+  model1 = nnet(touchdown  ~ ., 
+                     data = train, size = i, maxit = 1000, decay = 1e-4)
+  
+  
+  pred1 = predict(model1, test)
+  pred1 = ifelse(pred1 > 0.5, 1, 0)
+  conf.mat = table(pred1, test[,1])
+  
+  test.accuracy = sum(diag(conf.mat))/sum(conf.mat)
+  precision = conf.mat[2,2]/(conf.mat[2, 2] + conf.mat[2,1])
+  recall = conf.mat[2,2]/(conf.mat[2,2] + conf.mat[1,2])
+  f1 = 2*precision*recall/(precision + recall)
+  
+  models1[[i]] = model1
+  confusion[[i]] = conf.mat
+  acc.storage[i, 1] = i
+  acc.storage[i, 2] = test.accuracy
+  acc.storage[i, 3] = precision
+  acc.storage[i, 4] = recall
+  acc.storage[i, 5] = f1
+
+}
+
+report.best = c(accuracy = which.max(acc.storage[,2]), precision = which.max(acc.storage[,3]), recall = which.max(acc.storage[,4]), f1 = which.max(acc.storage[,5]))
+
+#since we care most about recall, we could make the decision to use n = 5 nodes.
