@@ -1,20 +1,20 @@
-#this code is mostly a quick run through some neural network code in the neuralnet and nnet packages and performing some minor model selection on some rather simplistic versions of the model.
-#This code will include other models (random forest and logistic regression) in the near future
+##this code runs through a few basic machine learning techniques in an attempt to classify an individual play as "touchdown" vs. "no touchdown"
+##primary purpose is to use the "nflscrapr" package
+##future goal is to predict first downs instead of touchdowns (avoids the rare cases issue that arises here)
 
-library(nflscrapr) #using nflscrapr package found here https://github.com/maksimhorowitz/nflscrapR
+
+library(nflscrapr)
 library(tidyverse)
 
-pbp_2018 = scrape_season_play_by_play(2018, week = 1) #scraping all play by play data from 2018
-write.csv(pbp_2018, file = "pbp_2018.csv") #saving data to computer
+games_2018 = scrape_game_ids(2018)
+pbp_2018 = scrape_season_play_by_play(2018, week = 1)
+write.csv(pbp_2018, file = "pbp_2018.csv") #saving data
 
 data = read.csv("C:/Users/ryanh/Documents/pbp_2018.csv")
 data$play_type = as.factor(data$play_type)
 
-run_and_pass = data[which(data$play_type == "run" | data$play_type == "pass"),] #limiting to offensive plays (runs or passes)
+run_and_pass = data[which(data$play_type == "run" | data$play_type == "pass"),]
 
-#choosing the covariates we wish to consider in our model, note that play_type for pass and run defaults to 5 and 9 respectively as factor names
-#also scaling numeric covariates (yards_to_td, time, ydstogo) to help neural network fit more effectively
-#the response is touchdown (1 = TD, 0 = No TD), the covariates are type (run/pass), yards_to_td (yards from endzone), time (time remaining in the game in seconds), down (down 1-4), ydstogo(distance from first down), and goaltogo (indicator that is 1 if the play is in a "goal to go" scenario, 0 if it is not)
 
 newdata = as.data.frame(cbind(touchdown = run_and_pass$touchdown, 
                               type = run_and_pass$play_type, 
@@ -33,39 +33,38 @@ newdata$ydstogo = (newdata$ydstogo - min(newdata$ydstogo))/(max(newdata$ydstogo)
 newdata$goaltogo = as.factor(newdata$goaltogo)
 
 
+#two separate neural network attempts
 
-
-#using neuralnet package first
+#neuralnet
 
 library(neuralnet)
+library(sigmoid)
 
-ind = sample(2, nrow(newdata), replace = T, prob = c(0.7, 0.3)) #segmenting the data into training and test datasets at 70/30 split
+ind = sample(2, nrow(newdata), replace = T, prob = c(0.7, 0.3))
 train = newdata[ind == 1,]
 test = newdata[ind == 2,]
 
-new.train = model.matrix(~ ., data = train) #creating model matrices for training and test data to account for categorical variable inputs for the neuralnet function
+new.train = model.matrix(~ ., data = train)
 new.test = model.matrix(~ ., data = test)
 
-#this is the absolute worst we could do as a prediction if we guessed that every play was NOT a touchdown. We will compare to this number later
 benchmark.accuracy = length(which(train$touchdown == 0))/length(train$touchdown) #assuming we just guessed that all plays were not touchdown
 
-storage = matrix(nrow = 7, ncol = 2) #a matrix that will hold some values in our neuralnet function
-models = list() #will hold all list info
+storage = matrix(nrow = 7, ncol = 2)
+models = list()
+confusion = list()
 
-#this function will run 7 different neural networks with increasing amount of nodes (from 1 to 7, since that is the number of inputs we have)
 for(i in 1:7){
   
   model1 = neuralnet(touchdown1 ~ type9 + yards_to_td + time + down2 + down3 + down4 + ydstogo + goaltogo1, 
-                   data = new.train, hidden = i, linear.output = FALSE) 
+                   data = new.train, hidden = i, linear.output = FALSE, learningrate = 1e-4)
 
 
-  pred1 = predict(model1, new.test) #predicting using the test data
-  pred1 = ifelse(pred1 > 0.5, 1, 0) #using a 0.5 threshold, we assign TRUE (1) or FALSE (0) values to our results as a classification method
-  conf.mat = table(pred1, test[,1]) #produce the confusion matrix for the model
+  pred1 = predict(model1, new.test)
+  pred1 = ifelse(pred1 > 0.5, 1, 0)
+  conf.mat = table(pred1, test[,1])
   
-  #calculating prediction accuracy, precision, recall, and f1 score as a means of evaluating the model performance
-  test.accuracy = sum(diag(conf.mat))/sum(conf.mat) #overall prediction accuracy
-  precision = conf.mat[2,2]/(conf.mat[2, 2] + conf.mat[2,1]) 
+  test.accuracy = sum(diag(conf.mat))/sum(conf.mat)
+  precision = conf.mat[2,2]/(conf.mat[2, 2] + conf.mat[2,1])
   recall = conf.mat[2,2]/(conf.mat[2,2] + conf.mat[1,2])
   f1 = 2*precision*recall/(precision + recall)
   
@@ -79,21 +78,16 @@ for(i in 1:7){
 
 }
 
-#a quick summary of best model performance for each metric by the number of nodes involved
 report.best = c(accuracy = which.max(acc.storage[,2]), precision = which.max(acc.storage[,3]), recall = which.max(acc.storage[,4]), f1 = which.max(acc.storage[,5]))
 
 
 #nnet
 library(nnet)
 
-#we run the same code in nnet instead of neuralnet
-#nnet doesn't have cool plot functions but runs more quickly in my experience
-
-acc.storage = matrix(nrow = 7, ncol = 5) #choose i to go from 1 to 7 to avoid overfitting since we only have 7 inputs
+acc.storage1 = matrix(nrow = 7, ncol = 5) #choose i to go from 1 to 7 to avoid overfitting since we only have 7 inputs
 models1 = list()
-confusion = list()
+confusion1 = list()
 
-#basically the same code as before, just we don't have to create model matrices now, nnet is equipped to handle factors unlike neuralnet
 for(i in 1:7){
   
   model1 = nnet(touchdown  ~ ., 
@@ -110,15 +104,39 @@ for(i in 1:7){
   f1 = 2*precision*recall/(precision + recall)
   
   models1[[i]] = model1
-  confusion[[i]] = conf.mat
-  acc.storage[i, 1] = i
-  acc.storage[i, 2] = test.accuracy
-  acc.storage[i, 3] = precision
-  acc.storage[i, 4] = recall
-  acc.storage[i, 5] = f1
+  confusion1[[i]] = conf.mat
+  acc.storage1[i, 1] = i
+  acc.storage1[i, 2] = test.accuracy
+  acc.storage1[i, 3] = precision
+  acc.storage1[i, 4] = recall
+  acc.storage1[i, 5] = f1
 
 }
 
-report.best = c(accuracy = which.max(acc.storage[,2]), precision = which.max(acc.storage[,3]), recall = which.max(acc.storage[,4]), f1 = which.max(acc.storage[,5]))
+report.best1 = c(accuracy = which.max(acc.storage1[,2]), precision = which.max(acc.storage1[,3]), recall = which.max(acc.storage1[,4]), f1 = which.max(acc.storage1[,5]))
 
 #since we care most about recall, we could make the decision to use n = 5 nodes.
+
+##randomforest
+
+library(randomForest)
+library(caret)
+
+rf = randomForest(touchdown ~ ., data = train, 
+                  ntree = 100, 
+                  mtry = 2,
+                  importance = TRUE,
+                  proximity = TRUE)
+
+p1 = predict(rf, test)
+conf.rf = table(p1, test$touchdown)
+
+t = tuneRF(train[,-1], train[,1],
+       stepFactor = 0.5,
+       plot = TRUE,
+       ntreeTry = 50,
+       trace = TRUE,
+       improve = 0.01)
+
+#performs VERY poorly, worse than assuming all cases are false/no touchdown
+#need to address rare case problem using gradient boosting (coming soon)
